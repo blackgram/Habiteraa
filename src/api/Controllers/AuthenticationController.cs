@@ -84,7 +84,8 @@ namespace Habitera.Controllers
                 return Ok(result);
             }
 
-            return Unauthorized(result);
+            // Preserve 403 for unverified accounts so the app can route to OTP.
+            return StatusCode(result.StatusCode, result);
 
         }
 
@@ -115,14 +116,7 @@ namespace Habitera.Controllers
             request.DeviceInfo = HttpContext.Request.Headers["User-Agent"].ToString();
 
             var result = await _authenticationService.RegisterAsync(request);
-
-            if (result.Success)
-            {
-                return Ok(result);
-            }
-
-            return BadRequest(result);
-
+            return StatusCode(result.StatusCode, result);
         }
 
         [HttpPost("ResendVerification")]

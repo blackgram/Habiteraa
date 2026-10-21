@@ -1,4 +1,4 @@
-﻿using Habitera.DTOs;
+using Habitera.DTOs;
 using Habitera.Models;
 using Habitera.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -16,15 +16,18 @@ namespace Habitera.Controllers
     {
         private readonly IPropertyService _propertyService;
         private readonly IRecommendationService _recommendationService;
+        private readonly ILocationSuggestionService _locationSuggestionService;
         private readonly ILogger<PropertyController> _logger;
 
         public PropertyController(
             IPropertyService propertyService,
             IRecommendationService recommendationService,
+            ILocationSuggestionService locationSuggestionService,
             ILogger<PropertyController> logger)
         {
             _propertyService = propertyService;
             _recommendationService = recommendationService;
+            _locationSuggestionService = locationSuggestionService;
             _logger = logger;
         }
 
@@ -107,9 +110,31 @@ namespace Habitera.Controllers
             [FromQuery] string query,
             [FromQuery] int limit = 10)
         {
-            //var locations = await _elasticsearchService.GetLocationSuggestionsAsync(query, limit);
-            //return Ok(new { locations });
-            return Ok(new {  });
+            var result = await _locationSuggestionService.SuggestAsync(query, limit);
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpGet("ForLocation")]
+        public async Task<IActionResult> GetListingsForLocation(
+            [FromQuery] double latitude,
+            [FromQuery] double longitude,
+            [FromQuery] string? label = null,
+            [FromQuery] string? city = null,
+            [FromQuery] string? state = null,
+            [FromQuery] string? country = null,
+            [FromQuery] double localRadiusKm = 10,
+            [FromQuery] int nearbyLimit = 20)
+        {
+            var result = await _propertyService.GetListingsForLocationAsync(
+                latitude,
+                longitude,
+                label,
+                city,
+                state,
+                country,
+                localRadiusKm,
+                nearbyLimit);
+            return StatusCode(result.StatusCode, result);
         }
 
         [HttpPost]
@@ -173,12 +198,26 @@ namespace Habitera.Controllers
             return StatusCode(result.StatusCode, result);
         }
 
+        /// <summary>
+        /// Submit a listing for admin review. Listings are not live until approved
+        /// (or auto-approved after the configured timeout).
+        /// </summary>
+        [HttpPost("{propertyId}/SubmitForReview")]
+        [Authorize(Roles = "Agent")]
+        public async Task<IActionResult> SubmitForReview(Guid propertyId)
+        {
+            var agentId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+            var result = await _propertyService.SubmitForReviewAsync(agentId, propertyId);
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [Obsolete("Use SubmitForReview. Agent publish no longer goes live immediately.")]
         [HttpPost("{propertyId}/Publish")]
         [Authorize(Roles = "Agent")]
         public async Task<IActionResult> PublishProperty(Guid propertyId)
         {
             var agentId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
-            var result = await _propertyService.PublishPropertyAsync(agentId, propertyId);
+            var result = await _propertyService.SubmitForReviewAsync(agentId, propertyId);
             return StatusCode(result.StatusCode, result);
         }
 
@@ -280,38 +319,8 @@ namespace Habitera.Controllers
         public async Task<IActionResult> SeedTestData()
         {
             var agentId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
-            // Create sample properties for testing
-            var testProperties = new[]
-            {
-                new CreatePropertyDTO
-                {
-                    Title = "Luxury 3BR Apartment in Lekki Phase 1",
-                    Description = "Modern apartment with pool, gym, and 24/7 security",
-                    PropertyType = PropertyType.Apartment,
-                    ListingType = ListingType.ForRent,
-                    Tenor = PropertyTenor.Annually,
-                    City = "Lagos",
-                    State = "Lagos",
-                    Country = "Nigeria",
-                    Street = "Admiralty Way",
-                    PostalCode = "101245",
-                    Latitude = 6.4474m,
-                    Longitude = 3.4700m,
-                    Bedrooms = 3,
-                    Bathrooms = 2.5m,
-                    SquareFeet = 1500m,
-                    Price = 5000000m,
-                    Currency = "NGN"
-                },
-                // Add more test properties with varying prices, locations, etc.
-            };
-
-            foreach (var dto in testProperties)
-            {
-                await _propertyService.CreatePropertyAsync(agentId, dto);
-            }
-
-            return Ok(new { message = $"{testProperties.Length} test properties created" });
+            var result = await _propertyService.SeedDemoListingsAsync(agentId);
+            return StatusCode(result.StatusCode, result);
         }
 
         

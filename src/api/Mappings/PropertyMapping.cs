@@ -1,4 +1,4 @@
-﻿using AutoMapper;
+using AutoMapper;
 using Habitera.Models;
 using Habitera.DTOs;
 
@@ -15,7 +15,11 @@ namespace Habitera.Mappings
                 .ForMember(dest => dest.IsFavorited, opt => opt.Ignore()) // Will be set manually based on user
                 .ForMember(dest => dest.Images, opt => opt.MapFrom(src =>
                     src.Images.OrderBy(i => i.DisplayOrder)))
-                .ForMember(dest => dest.Amenities, opt => opt.MapFrom(src => src.Amenities));
+                .ForMember(dest => dest.PrimaryImageUrl, opt => opt.MapFrom(src =>
+                    GetPrimaryImageUrl(src)))
+                .ForMember(dest => dest.Location, opt => opt.Ignore())
+                .ForMember(dest => dest.Amenities, opt => opt.MapFrom(src => src.Amenities))
+                .ForMember(dest => dest.Status, opt => opt.MapFrom(src => src.Status.ToString()));
 
             CreateMap<Property, PropertySummaryDTO>()
                 .ForMember(dest => dest.FullAddress, opt => opt.MapFrom(src =>
@@ -26,7 +30,7 @@ namespace Habitera.Mappings
             CreateMap<CreatePropertyDTO, Property>()
                 .ForMember(dest => dest.Id, opt => opt.Ignore())
                 .ForMember(dest => dest.AgentId, opt => opt.Ignore())
-                .ForMember(dest => dest.Status, opt => opt.MapFrom(src => PropertyStatus.Active))
+                .ForMember(dest => dest.Status, opt => opt.MapFrom(src => PropertyStatus.Pending))
                 .ForMember(dest => dest.IsPublished, opt => opt.MapFrom(src => false))
                 .ForMember(dest => dest.IsFeatured, opt => opt.MapFrom(src => false))
                 .ForMember(dest => dest.ViewCount, opt => opt.MapFrom(src => 0))
@@ -34,6 +38,8 @@ namespace Habitera.Mappings
                 .ForMember(dest => dest.CreatedAt, opt => opt.MapFrom(src => DateTime.UtcNow))
                 .ForMember(dest => dest.UpdatedAt, opt => opt.MapFrom(src => DateTime.UtcNow))
                 .ForMember(dest => dest.PublishedAt, opt => opt.Ignore())
+                .ForMember(dest => dest.ReviewSubmittedAt, opt => opt.Ignore())
+                .ForMember(dest => dest.RejectionReason, opt => opt.Ignore())
                 .ForMember(dest => dest.Images, opt => opt.Ignore())
                 .ForMember(dest => dest.Amenities, opt => opt.Ignore())
                 .ForMember(dest => dest.Favorites, opt => opt.Ignore())

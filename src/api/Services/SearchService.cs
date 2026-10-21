@@ -27,10 +27,8 @@ namespace Habitera.Services
 
         public async Task<PropertySearchResponse> SearchPropertiesAsync(PropertySearchRequest request)
         {
-            var properties = await _unitOfWork.Properties.GetAllAsync();
-            var query = properties
-                .AsQueryable()
-                .Where(p => p.IsPublished && p.Status == PropertyStatus.Active);
+            var properties = await _unitOfWork.Properties.GetAllPublishedAsync(PropertyStatus.Active);
+            var query = properties.AsQueryable();
 
             // Text search on title and description
             if (!string.IsNullOrWhiteSpace(request.Query))
@@ -218,12 +216,15 @@ namespace Habitera.Services
                 Description = property.Description,
                 PropertyType = property.PropertyType,
                 ListingType = property.ListingType,
+                Tenor = property.Tenor,
                 Street = property.Street,
                 City = property.City,
                 State = property.State,
                 Country = property.Country,
                 PostalCode = property.PostalCode,
                 FullAddress = fullAddress,
+                Latitude = property.Latitude,
+                Longitude = property.Longitude,
                 Bedrooms = property.Bedrooms,
                 Bathrooms = property.Bathrooms,
                 SquareFeet = property.SquareFeet,
@@ -244,7 +245,7 @@ namespace Habitera.Services
                     DisplayOrder = i.DisplayOrder,
                     IsPrimary = i.IsPrimary
                 }).ToList() ?? new List<PropertyImageDTO>(),
-                PrimaryImageUrl = primaryImage?.ImageUrl,
+                PrimaryImageUrl = primaryImage?.ImageUrl ?? property.Images?.OrderBy(i => i.DisplayOrder).FirstOrDefault()?.ImageUrl,
                 CreatedAt = property.CreatedAt,
                 UpdatedAt = property.UpdatedAt,
                 PublishedAt = property.PublishedAt,

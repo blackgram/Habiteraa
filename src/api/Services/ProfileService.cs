@@ -16,6 +16,9 @@ namespace Habitera.Services
         Task<OperationResult<ApplicationUserDTO>> UpdateRegularUserProfileAsync(Guid userId, CompleteRegularUserProfileDTO dto);
         Task<OperationResult<ApplicationUserDTO>> UpdateAgentProfileAsync(Guid userId, CompleteAgentProfileDTO dto);
         Task<OperationResult<ApplicationUserDTO>> GetUserProfileAsync(Guid userId);
+        Task<OperationResult<ApplicationUserDTO>> UpdateProfilePhotoAsync(Guid userId, string profilePhoto);
+        Task<OperationResult<ApplicationUserDTO>> UploadProfilePhotoAsync(Guid userId, IFormFile file, string? publicBaseUrl);
+        Task<OperationResult<AgentPublicProfileDTO>> GetPublicAgentProfileAsync(Guid agentId);
     }
 
     public class ProfileService : IProfileService
@@ -24,19 +27,35 @@ namespace Habitera.Services
         private readonly IUnitOfWork _unitOfWork;
         private readonly IMapper _mapper;
         private readonly ITokenService _tokenService;
+        private readonly ICloudinaryService _cloudinaryService;
+        private readonly IWebHostEnvironment _environment;
         private readonly ILogger<ProfileService> _logger;
+
+        private static readonly HashSet<string> AllowedPresetAvatars = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "preset:avatar-1",
+            "preset:avatar-2",
+            "preset:avatar-3",
+            "preset:avatar-4",
+            "preset:avatar-5",
+            "preset:avatar-6",
+        };
 
         public ProfileService(
             UserManager<ApplicationUser> userManager,
             IUnitOfWork unitOfWork,
             IMapper mapper,
             ITokenService tokenService,
+            ICloudinaryService cloudinaryService,
+            IWebHostEnvironment environment,
             ILogger<ProfileService> logger)
         {
             _userManager = userManager;
             _unitOfWork = unitOfWork;
             _mapper = mapper;
             _tokenService = tokenService;
+            _cloudinaryService = cloudinaryService;
+            _environment = environment;
             _logger = logger;
         }
 
@@ -52,39 +71,14 @@ namespace Habitera.Services
                 if (user == null)
                     return OperationResult<ProfileCompletionStatusDTO>.Failure("User not found", 404);
 
+                var (missing, percentage) = ProfileCompletionHelper.Evaluate(user);
                 var status = new ProfileCompletionStatusDTO
                 {
                     IsProfileCompleted = user.ProfileCompleted,
                     UserType = user.UserType,
-                    MissingFields = new List<string>()
+                    MissingFields = missing,
+                    CompletionPercentage = percentage
                 };
-
-                if (user.UserType == UserType.User || user.UserType == UserType.Admin)
-                {
-                    if (string.IsNullOrWhiteSpace(user.Profile?.FirstName))
-                        status.MissingFields.Add("FirstName");
-                    if (string.IsNullOrWhiteSpace(user.Profile?.LastName))
-                        status.MissingFields.Add("LastName");
-                    if (string.IsNullOrWhiteSpace(user.Profile?.City))
-                        status.MissingFields.Add("City");
-                    if (string.IsNullOrWhiteSpace(user.Profile?.State))
-                        status.MissingFields.Add("State");
-                    if (string.IsNullOrWhiteSpace(user.Profile?.Country))
-                        status.MissingFields.Add("Country");
-                    if (user.Profile?.Location == null || (user.Profile.Location.X == 0 && user.Profile.Location.Y == 0))
-                        status.MissingFields.Add("Location");
-                }
-                else if (user.UserType == UserType.Agent)
-                {
-                    if (string.IsNullOrWhiteSpace(user.Profile?.FirstName))
-                        status.MissingFields.Add("FirstName");
-                    if (string.IsNullOrWhiteSpace(user.Profile?.LastName))
-                        status.MissingFields.Add("LastName");
-                }
-
-                var totalFields = user.UserType == UserType.Agent ? 2 : 6;
-                var completedFields = totalFields - status.MissingFields.Count;
-                status.CompletionPercentage = (int)((completedFields / (double)totalFields) * 100);
 
                 return OperationResult<ProfileCompletionStatusDTO>.Successful(status);
             }
@@ -271,6 +265,7 @@ namespace Habitera.Services
                 }
 
                 user.UpdatedAt = DateTime.UtcNow;
+                ProfileCompletionHelper.TryMarkCompleted(user);
 
                 await _userManager.UpdateAsync(user);
                 await _unitOfWork.SaveChangesAsync();
@@ -322,6 +317,7 @@ namespace Habitera.Services
                 }
 
                 user.UpdatedAt = DateTime.UtcNow;
+                ProfileCompletionHelper.TryMarkCompleted(user);
 
                 await _userManager.UpdateAsync(user);
                 await _unitOfWork.SaveChangesAsync();
@@ -363,6 +359,167 @@ namespace Habitera.Services
                 _logger.LogError(ex, "Error getting profile for user {UserId}", userId);
                 return OperationResult<ApplicationUserDTO>.Failure(
                     "An error occurred while retrieving profile", 500);
+            }
+        }
+
+        public async Task<OperationResult<ApplicationUserDTO>> UpdateProfilePhotoAsync(
+            Guid userId,
+            string profilePhoto)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(profilePhoto))
+                    return OperationResult<ApplicationUserDTO>.Failure("Profile photo is required", 400);
+
+                var value = profilePhoto.Trim();
+                var isPreset = AllowedPresetAvatars.Contains(value);
+                var isHttpUrl = value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || value.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+                var isLocalUpload = value.StartsWith("/uploads/", StringComparison.OrdinalIgnoreCase);
+
+                if (!isPreset && !isHttpUrl && !isLocalUpload)
+                {
+                    return OperationResult<ApplicationUserDTO>.Failure(
+                        "Invalid profile photo value", 400);
+                }
+
+                var user = await _userManager.Users
+                    .Include(u => u.Profile)
+                    .Include(u => u.AgentProfile)
+                    .FirstOrDefaultAsync(u => u.Id == userId);
+
+                if (user == null)
+                    return OperationResult<ApplicationUserDTO>.Failure("User not found", 404);
+
+                user.ProfilePhoto = value;
+                user.UpdatedAt = DateTime.UtcNow;
+
+                await _userManager.UpdateAsync(user);
+                await _unitOfWork.SaveChangesAsync();
+
+                ApplicationUserDTO userDto = user.UserType == UserType.Agent
+                    ? _mapper.Map<AgentUserDTO>(user)
+                    : _mapper.Map<RegularUserDTO>(user);
+
+                return OperationResult<ApplicationUserDTO>.Successful(
+                    userDto,
+                    "Profile photo updated successfully");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating profile photo for user {UserId}", userId);
+                return OperationResult<ApplicationUserDTO>.Failure(
+                    "An error occurred while updating profile photo", 500);
+            }
+        }
+
+        public async Task<OperationResult<ApplicationUserDTO>> UploadProfilePhotoAsync(
+            Guid userId,
+            IFormFile file,
+            string? publicBaseUrl)
+        {
+            try
+            {
+                if (file == null || file.Length == 0)
+                    return OperationResult<ApplicationUserDTO>.Failure("Image file is required", 400);
+
+                string photoValue;
+
+                var cloudinaryResult = await _cloudinaryService.UploadAvatarAsync(file, "profiles");
+                if (cloudinaryResult.Success && cloudinaryResult.Data != null)
+                {
+                    photoValue = cloudinaryResult.Data.Url;
+                }
+                else
+                {
+                    // Local/dev fallback when Cloudinary is unavailable
+                    var uploadsRoot = Path.Combine(_environment.ContentRootPath, "wwwroot", "uploads", "profiles");
+                    Directory.CreateDirectory(uploadsRoot);
+
+                    var extension = Path.GetExtension(file.FileName);
+                    if (string.IsNullOrWhiteSpace(extension))
+                        extension = ".jpg";
+
+                    var fileName = $"{userId:N}{extension.ToLowerInvariant()}";
+                    var filePath = Path.Combine(uploadsRoot, fileName);
+
+                    await using (var stream = new FileStream(filePath, FileMode.Create))
+                    {
+                        await file.CopyToAsync(stream);
+                    }
+
+                    var relativePath = $"/uploads/profiles/{fileName}";
+                    photoValue = string.IsNullOrWhiteSpace(publicBaseUrl)
+                        ? relativePath
+                        : $"{publicBaseUrl.TrimEnd('/')}{relativePath}";
+
+                    _logger.LogWarning(
+                        "Cloudinary avatar upload failed ({Message}); saved local profile photo for {UserId}",
+                        cloudinaryResult.Message,
+                        userId);
+                }
+
+                return await UpdateProfilePhotoAsync(userId, photoValue);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error uploading profile photo for user {UserId}", userId);
+                return OperationResult<ApplicationUserDTO>.Failure(
+                    "An error occurred while uploading profile photo", 500);
+            }
+        }
+
+        public async Task<OperationResult<AgentPublicProfileDTO>> GetPublicAgentProfileAsync(Guid agentId)
+        {
+            try
+            {
+                var agent = await _userManager.Users
+                    .AsNoTracking()
+                    .Include(u => u.Profile)
+                    .Include(u => u.AgentProfile)
+                    .FirstOrDefaultAsync(u => u.Id == agentId && u.DeletedAt == null);
+
+                if (agent == null || agent.UserType != UserType.Agent)
+                {
+                    return OperationResult<AgentPublicProfileDTO>.Failure("Agent not found", 404);
+                }
+
+                var properties = await _unitOfWork.Properties.GetPropertiesByAgentAsync(agentId);
+                var published = properties
+                    .Where(p => p.IsPublished && p.Status == PropertyStatus.Active)
+                    .OrderByDescending(p => p.PublishedAt ?? p.CreatedAt)
+                    .ToList();
+
+                var profile = agent.Profile;
+                var agentProfile = agent.AgentProfile;
+                var fullName = profile == null
+                    ? "Agent"
+                    : $"{profile.FirstName} {profile.LastName}".Trim();
+
+                var dto = new AgentPublicProfileDTO
+                {
+                    Id = agent.Id,
+                    FullName = string.IsNullOrWhiteSpace(fullName) ? "Agent" : fullName,
+                    ProfilePhoto = agent.ProfilePhoto,
+                    AgencyName = agentProfile?.AgencyName,
+                    LicenseNumber = agentProfile?.LicenseNumber,
+                    AverageRating = agentProfile?.AverageRating ?? 0,
+                    TotalReviews = agentProfile?.TotalReviews ?? 0,
+                    City = profile?.City,
+                    State = profile?.State,
+                    Country = profile?.Country,
+                    MemberSince = agent.CreatedAt,
+                    ListingCount = published.Count,
+                    Listings = _mapper.Map<List<PropertyDTO>>(published)
+                };
+
+                return OperationResult<AgentPublicProfileDTO>.Successful(dto);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting public profile for agent {AgentId}", agentId);
+                return OperationResult<AgentPublicProfileDTO>.Failure(
+                    "An error occurred while retrieving the agent profile", 500);
             }
         }
     }

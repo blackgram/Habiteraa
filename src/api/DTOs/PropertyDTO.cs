@@ -1,4 +1,4 @@
-﻿using Elastic.Clients.Elasticsearch;
+using Elastic.Clients.Elasticsearch;
 using Habitera.Models;
 using System.ComponentModel.DataAnnotations;
 
@@ -25,7 +25,15 @@ namespace Habitera.DTOs
         public string PostalCode { get; set; } = null!;
         public string FullAddress { get; set; } = null!;
 
-        public GeoLocation Location { get; set; } = null!;
+        public decimal Latitude { get; set; }
+        public decimal Longitude { get; set; }
+
+        /// <summary>
+        /// Distance in km from the requested reference point (when geo-sorted).
+        /// </summary>
+        public double? DistanceKm { get; set; }
+
+        public GeoLocation? Location { get; set; }
 
         public int Bedrooms { get; set; } = 0;
         public decimal Bathrooms { get; set; } = 0;
@@ -44,6 +52,7 @@ namespace Habitera.DTOs
 
         public int ViewCount { get; set; }
         public int FavoriteCount { get; set; }
+        public int ContactCount { get; set; }
         public List<PropertyImageDTO> Images { get; set; } = new();
         public string? PrimaryImageUrl { get; set; }
 
@@ -55,9 +64,17 @@ namespace Habitera.DTOs
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
         public DateTime? PublishedAt { get; set; }
+        public DateTime? ReviewSubmittedAt { get; set; }
+        public string? RejectionReason { get; set; }
 
         public double PricePerSquareFoot { get; set; }
         public int DaysOnMarket { get; set; }
+    }
+
+    public class RejectListingRequestDTO
+    {
+        [MaxLength(500)]
+        public string? Reason { get; set; }
     }
 
 
@@ -118,6 +135,7 @@ namespace Habitera.DTOs
         public string? Description { get; set; }
         public PropertyType? PropertyType { get; set; }
         public ListingType? ListingType { get; set; }
+        public PropertyTenor? Tenor { get; set; }
         public decimal? Price { get; set; }
         public int? Bedrooms { get; set; }
         public decimal? Bathrooms { get; set; }

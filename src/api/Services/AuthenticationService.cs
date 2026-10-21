@@ -108,26 +108,29 @@ namespace Habitera.Services
                             }
 
                             _logger.LogInformation(
-                                "Registration attempted for existing verified user. CorrelationId: {CorrelationId}",
-                                correlationId);
+                                "Registration attempted for existing verified user. CorrelationId: {CorrelationId}, ExistingUserType: {ExistingUserType}, RequestedUserType: {RequestedUserType}",
+                                correlationId,
+                                existingUser.UserType,
+                                request.UserType);
 
                             await transaction.RollbackAsync();
-                            await Task.Delay(Random.Shared.Next(100, 300));
 
-                            return OperationResult<AuthResponseDTO>.Successful(
-                                null,
-                                "Registration successful. Please check your email for verification code.",
-                                201
-                            );
+                            var existingTypeLabel = existingUser.UserType == UserType.Agent
+                                ? "an agent"
+                                : "a user";
 
-                          
+                            var message = existingUser.UserType != request.UserType
+                                ? $"This email is already registered as {existingTypeLabel} account. Sign in with that account type, or use a different email."
+                                : "An account with this email already exists. Please sign in instead.";
+
+                            return OperationResult<AuthResponseDTO>.Failure(message, 409);
                         }
 
                         var userProfile = new UserProfile
                         {
                             UserId = Guid.NewGuid(),
-                            FirstName = "",
-                            LastName = "",
+                            FirstName = request.FirstName?.Trim() ?? "",
+                            LastName = request.LastName?.Trim() ?? "",
                             City = "",
                             State = "",
                             Country = "",
@@ -143,6 +146,9 @@ namespace Habitera.Services
                             Id = userProfile.UserId,
                             UserName = request.Email,
                             Email = request.Email,
+                            PhoneNumber = string.IsNullOrWhiteSpace(request.PhoneNumber)
+                                ? null
+                                : request.PhoneNumber.Trim(),
                             EmailConfirmed = false,
                             UserType = request.UserType,
                             Status = UserStatus.New,
@@ -280,11 +286,13 @@ namespace Habitera.Services
 
                 var normalizedEmail = NormalizeEmail(request.Email);
 
-                // Conditionally include AgentProfile based on user type
+                // Match the exact email Identity stored (including +aliases).
                 var user = await _userManager.Users
                     .Include(u => u.Profile)
-                    .Include(u => u.AgentProfile)  // Add this
-                    .FirstOrDefaultAsync(u => u.NormalizedEmail == normalizedEmail.ToUpper());
+                    .Include(u => u.AgentProfile)
+                    .FirstOrDefaultAsync(u =>
+                        u.NormalizedEmail == normalizedEmail.ToUpperInvariant() ||
+                        u.Email!.ToLower() == normalizedEmail);
 
                 if (user == null)
                 {
@@ -294,10 +302,22 @@ namespace Habitera.Services
                     );
                 }
 
-                if (!user.EmailConfirmed)
+                // Validate credentials before revealing verification state or sending OTP.
+                var result = await _signInManager.CheckPasswordSignInAsync(user, request.Password, false);
+                if (!result.Succeeded)
                 {
                     return OperationResult<AuthResponseDTO>.Failure(
-                        "Account not verified. Please verify your email first.",
+                        "Invalid email or password",
+                        401
+                    );
+                }
+
+                if (!user.EmailConfirmed)
+                {
+                    await TryQueueVerificationEmailOnLoginAsync(user, correlationId);
+
+                    return OperationResult<AuthResponseDTO>.Failure(
+                        "Account not verified. We've sent a verification code to your email.",
                         403
                     );
                 }
@@ -307,15 +327,6 @@ namespace Habitera.Services
                     return OperationResult<AuthResponseDTO>.Failure(
                         "Account is not active",
                         403
-                    );
-                }
-
-                var result = await _signInManager.CheckPasswordSignInAsync(user, request.Password, false);
-                if (!result.Succeeded)
-                {
-                    return OperationResult<AuthResponseDTO>.Failure(
-                        "Invalid email or password",
-                        401
                     );
                 }
 
@@ -1629,6 +1640,13 @@ namespace Habitera.Services
 
                 resetToken.PlainCode = code;
 
+                if (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Development")
+                {
+                    _logger.LogWarning(
+                        "DEV password reset code for {Email}: {Code} (CorrelationId: {CorrelationId})",
+                        email, code, correlationId);
+                }
+
                 return resetToken;
             }
             catch (Exception ex)
@@ -1637,6 +1655,95 @@ namespace Habitera.Services
                     "Failed to generate password reset code. CorrelationId: {CorrelationId}, Email: {Email}",
                     correlationId, email);
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Best-effort OTP email when an unverified user logs in with a valid password.
+        /// Respects resend cooldown; never fails the login response if send is skipped.
+        /// </summary>
+        private async Task TryQueueVerificationEmailOnLoginAsync(
+            ApplicationUser user,
+            string correlationId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(user.Email))
+                {
+                    return;
+                }
+
+                if (user.Status != UserStatus.New && user.Status != UserStatus.Pending)
+                {
+                    _logger.LogInformation(
+                        "Skipping login verification email for ineligible status. CorrelationId: {CorrelationId}, UserId: {UserId}, Status: {Status}",
+                        correlationId, user.Id, user.Status);
+                    return;
+                }
+
+                var cooldownSeconds = _options.ResendCooldownSeconds;
+                var recentCode = await _unitOfWork.EmailVerificationTokens
+                    .GetLatestTokenForUserAsync(user.Id);
+
+                if (recentCode != null)
+                {
+                    var elapsedSeconds = (DateTime.UtcNow - recentCode.CreatedAt).TotalSeconds;
+                    if (elapsedSeconds < cooldownSeconds)
+                    {
+                        _logger.LogInformation(
+                            "Login verification email skipped due to cooldown. CorrelationId: {CorrelationId}, UserId: {UserId}",
+                            correlationId, user.Id);
+                        return;
+                    }
+                }
+
+                var verificationCode = await GenerateSecureVerificationCode(
+                    user.Id,
+                    user.Email,
+                    correlationId);
+
+                if (verificationCode == null || string.IsNullOrWhiteSpace(verificationCode.PlainCode))
+                {
+                    _logger.LogWarning(
+                        "Failed to generate login verification code. CorrelationId: {CorrelationId}, UserId: {UserId}",
+                        correlationId, user.Id);
+                    return;
+                }
+
+                var email = user.Email;
+                var plainCode = verificationCode.PlainCode;
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _emailService.SendEmailVerificationAsync(email, plainCode);
+                        _logger.LogInformation(
+                            "Login verification code sent. CorrelationId: {CorrelationId}",
+                            correlationId);
+                    }
+                    catch (Exception emailEx)
+                    {
+                        _logger.LogError(emailEx,
+                            "Failed to send login verification email. CorrelationId: {CorrelationId}, UserId: {UserId}",
+                            correlationId, user.Id);
+                    }
+                });
+
+                await LogAuditAsync(
+                    user.Id,
+                    "VerificationCodeResend",
+                    null,
+                    null,
+                    true,
+                    "Verification code resent on login",
+                    correlationId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Error queueing login verification email. CorrelationId: {CorrelationId}, UserId: {UserId}",
+                    correlationId, user.Id);
             }
         }
 
@@ -1680,6 +1787,13 @@ namespace Habitera.Services
                 await _unitOfWork.SaveChangesAsync();
 
                 verificationToken.PlainCode = code;
+
+                if (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Development")
+                {
+                    _logger.LogWarning(
+                        "DEV email verification code for {Email}: {Code} (CorrelationId: {CorrelationId})",
+                        email, code, correlationId);
+                }
 
                 return verificationToken;
             }
@@ -1927,30 +2041,16 @@ namespace Habitera.Services
             return sanitized;
         }
 
+        /// <summary>
+        /// Canonical form for lookups. Keep <c>+</c> aliases and dots — those are distinct accounts.
+        /// (Do not apply Gmail "same mailbox" collapsing here.)
+        /// </summary>
         private string NormalizeEmail(string email)
         {
             if (string.IsNullOrWhiteSpace(email))
                 return email;
 
-            var trimmed = email.Trim().ToLowerInvariant();
-
-            if (trimmed.EndsWith("@gmail.com") || trimmed.EndsWith("@googlemail.com"))
-            {
-                var parts = trimmed.Split('@');
-                var localPart = parts[0];
-
-                localPart = localPart.Replace(".", "");
-
-                var plusIndex = localPart.IndexOf('+');
-                if (plusIndex > 0)
-                {
-                    localPart = localPart.Substring(0, plusIndex);
-                }
-
-                trimmed = $"{localPart}@gmail.com";
-            }
-
-            return trimmed;
+            return email.Trim().ToLowerInvariant();
         }
 
         private string SanitizePhoneNumber(string? phoneNumber)

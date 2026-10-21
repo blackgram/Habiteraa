@@ -1,4 +1,6 @@
+using Habitera.Background;
 using Habitera.Data;
+using Habitera.Hubs;
 using Habitera.Extensions;
 using Habitera.Middleware;
 using Habitera.Models;
@@ -19,7 +21,16 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = Directory.GetCurrentDirectory(),
+    WebRootPath = "wwwroot"
+});
+
+Directory.CreateDirectory(builder.Environment.WebRootPath);
+
+builder.Services.AddHttpContextAccessor();
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -130,6 +141,21 @@ builder.Services.AddAuthentication(options =>
         IssuerSigningKey = new SymmetricSecurityKey(key),
         ClockSkew = TimeSpan.Zero
     };
+
+    options.Events = new JwtBearerEvents
+    {
+        OnMessageReceived = context =>
+        {
+            var accessToken = context.Request.Query["access_token"];
+            var path = context.HttpContext.Request.Path;
+            if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs/chat"))
+            {
+                context.Token = accessToken;
+            }
+
+            return Task.CompletedTask;
+        }
+    };
 });
 
 builder.Services.AddAuthorization();
@@ -185,6 +211,14 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
 
 builder.Services.AddHttpClient<EmailService>();
 
+builder.Services.AddHttpClient("Nominatim", client =>
+{
+    client.BaseAddress = new Uri("https://nominatim.openstreetmap.org/");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("Habitera/1.0 (local-dev; contact@habitera.local)");
+    client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+    client.Timeout = TimeSpan.FromSeconds(12);
+});
+
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<IRedisCacheService, RedisCacheService>();
 builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
@@ -192,11 +226,28 @@ builder.Services.AddScoped<IProfileService, ProfileService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPropertyService, PropertyService>();
+builder.Services.AddScoped<IAdminService, AdminService>();
 builder.Services.AddScoped<ISavedSearchService, SavedSearchService>();
 builder.Services.AddScoped<DatabaseSearchService>();
 builder.Services.AddScoped<IRecommendationService, RecommendationService>();
 builder.Services.AddScoped<IPriceAnalyticsService, PriceAnalyticsService>();
 builder.Services.AddScoped<ICloudinaryService, CloudinaryService>();
+builder.Services.AddScoped<ILocationSuggestionService, LocationSuggestionService>();
+builder.Services.AddScoped<IFavoriteService, FavoriteService>();
+builder.Services.AddScoped<IChatService, ChatService>();
+builder.Services.AddSingleton<IChatPresenceService, ChatPresenceService>();
+
+var redisForSignalR = builder.Configuration.GetConnectionString("Redis")
+    ?? throw new InvalidOperationException("Redis connection string not configured");
+builder.Services.AddSignalR()
+    .AddStackExchangeRedis(redisForSignalR, options =>
+    {
+        options.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal("Habitera");
+    });
+
+builder.Services.Configure<ListingModerationOptions>(
+    builder.Configuration.GetSection(ListingModerationOptions.SectionName));
+builder.Services.AddHostedService<ListingAutoApproveJob>();
 
 builder.Services.AddHealthChecks()
     .AddNpgSql(builder.Configuration.GetConnectionString("DefaultConnection")!)
@@ -258,9 +309,14 @@ app.UseMiddleware<BlockDeletedUsersMiddleware>();
 
 app.UseGlobalExceptionHandler();
 
-app.UseHttpsRedirection();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 app.UseCors("AllowAll");
+
+app.UseStaticFiles();
 
 app.UseRateLimiter();
 
@@ -268,5 +324,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<ChatHub>("/hubs/chat");
 
 app.Run();

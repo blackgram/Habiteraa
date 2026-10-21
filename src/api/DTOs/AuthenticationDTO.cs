@@ -1,10 +1,14 @@
 using Habitera.Models;
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 using NetTopologySuite.Geometries;
 
 namespace Habitera.DTOs
 {
 
+    [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
+    [JsonDerivedType(typeof(RegularUserDTO), "user")]
+    [JsonDerivedType(typeof(AgentUserDTO), "agent")]
     public class ApplicationUserDTO
     {
         public Guid Id { get; set; }
@@ -24,6 +28,7 @@ namespace Habitera.DTOs
         public DateTime? LastLoginAt { get; set; }
         public bool ProfileCompleted { get; set; }
         public DateTime? ProfileCompletedAt { get; set; }
+        public int CompletionPercentage { get; set; }
     }
 
     public class RegularUserDTO : ApplicationUserDTO
@@ -43,6 +48,9 @@ namespace Habitera.DTOs
 
     public class AgentUserDTO : ApplicationUserDTO
     {
+        public string City { get; set; } = string.Empty;
+        public string State { get; set; } = string.Empty;
+        public string Country { get; set; } = string.Empty;
         public string? LicenseNumber { get; set; }
         public string? AgencyName { get; set; }
         public decimal AverageRating { get; set; }
@@ -75,6 +83,21 @@ namespace Habitera.DTOs
 
         [Required]
         public UserType UserType { get; set; }
+
+        [MaxLength(100)]
+        public string? FirstName { get; set; }
+
+        [MaxLength(100)]
+        public string? LastName { get; set; }
+
+        [MaxLength(30)]
+        public string? PhoneNumber { get; set; }
+    }
+
+    public class UpdateProfilePhotoDTO
+    {
+        [Required, MaxLength(500)]
+        public string ProfilePhoto { get; set; } = string.Empty;
     }
 
     public class MockLoginRequestDTO
@@ -136,6 +159,23 @@ namespace Habitera.DTOs
     {
         public string Password { get; set; } = string.Empty;
         public string? Reason { get; set; }
+    }
+
+    public class AgentPublicProfileDTO
+    {
+        public Guid Id { get; set; }
+        public string FullName { get; set; } = string.Empty;
+        public string? ProfilePhoto { get; set; }
+        public string? AgencyName { get; set; }
+        public string? LicenseNumber { get; set; }
+        public decimal AverageRating { get; set; }
+        public int TotalReviews { get; set; }
+        public string? City { get; set; }
+        public string? State { get; set; }
+        public string? Country { get; set; }
+        public DateTime MemberSince { get; set; }
+        public int ListingCount { get; set; }
+        public List<PropertyDTO> Listings { get; set; } = new();
     }
 }
 

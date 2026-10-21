@@ -91,5 +91,33 @@ namespace Habitera.Controllers
             var result = await _profileService.GetUserProfileAsync(userId);
             return StatusCode(result.StatusCode, result);
         }
+
+        [HttpPut("Photo")]
+        public async Task<IActionResult> UpdateProfilePhoto([FromBody] UpdateProfilePhotoDTO dto)
+        {
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
+
+            var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+            var result = await _profileService.UpdateProfilePhotoAsync(userId, dto.ProfilePhoto);
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpPost("Photo")]
+        [RequestSizeLimit(5_000_000)]
+        public async Task<IActionResult> UploadProfilePhoto(IFormFile file)
+        {
+            var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+            var publicBaseUrl = $"{Request.Scheme}://{Request.Host}";
+            var result = await _profileService.UploadProfilePhotoAsync(userId, file, publicBaseUrl);
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpGet("Agents/{agentId:guid}")]
+        public async Task<IActionResult> GetPublicAgentProfile(Guid agentId)
+        {
+            var result = await _profileService.GetPublicAgentProfileAsync(agentId);
+            return StatusCode(result.StatusCode, result);
+        }
     }
 }

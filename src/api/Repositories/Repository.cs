@@ -63,6 +63,9 @@ namespace Habitera.Repositories
         Task<int> IncrementViewCountAsync(Guid propertyId);
         Task<Dictionary<PropertyStatus, int>> GetPropertyCountByStatusAsync(Guid agentId);
 
+        Task<PagedResult<Property>> GetPendingReviewPropertiesPagedAsync(int pageNumber, int pageSize);
+        Task<IEnumerable<Property>> GetListingsDueForAutoApprovalAsync(TimeSpan autoApproveAfter);
+
         Task<IEnumerable<Property>> GetPropertiesNearLocationAsync(
             decimal latitude,
             decimal longitude,
@@ -72,6 +75,7 @@ namespace Habitera.Repositories
         Task<IEnumerable<Property>> GetPropertiesByIdsAsync(IEnumerable<Guid> propertyIds);
         Task<bool> PropertyExistsAsync(Guid propertyId);
         Task<bool> IsAgentOwnerAsync(Guid propertyId, Guid agentId);
+        Task<Dictionary<Guid, int>> GetContactCountsAsync(IEnumerable<Guid> propertyIds);
     }
 
     public interface IPropertyImageRepository : IGenericRepository<PropertyImage>
@@ -94,10 +98,13 @@ namespace Habitera.Repositories
     public interface IFavoriteRepository : IGenericRepository<Favorite>
     {
         Task<PagedResult<Property>> GetUserFavoritesAsync(Guid userId, int pageNumber, int pageSize);
+        Task<List<Guid>> GetUserFavoritePropertyIdsAsync(Guid userId);
         Task<bool> IsFavoriteAsync(Guid userId, Guid propertyId);
         Task<Favorite?> GetFavoriteAsync(Guid userId, Guid propertyId);
         Task<bool> ToggleFavoriteAsync(Guid userId, Guid propertyId);
+        Task SetFavoriteAsync(Guid userId, Guid propertyId, bool bookmarked);
         Task<int> GetFavoriteCountByPropertyAsync(Guid propertyId);
+        Task<Dictionary<Guid, int>> GetFavoriteCountsAsync(IEnumerable<Guid> propertyIds);
         Task<Dictionary<Guid, bool>> GetFavoriteStatusesAsync(Guid userId, IEnumerable<Guid> propertyIds);
     }
 
@@ -413,12 +420,57 @@ namespace Habitera.Repositories
             var property = await _dbSet.FindAsync(propertyId);
             if (property == null) return false;
 
+            property.Status = PropertyStatus.Active;
             property.IsPublished = true;
             property.PublishedAt = DateTime.UtcNow;
             property.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
             return true;
+        }
+
+        public async Task<PagedResult<Property>> GetPendingReviewPropertiesPagedAsync(
+            int pageNumber,
+            int pageSize)
+        {
+            var query = _dbSet
+                .Where(p =>
+                    p.Status == PropertyStatus.Pending &&
+                    p.ReviewSubmittedAt != null &&
+                    !p.IsPublished)
+                .Include(p => p.Images.OrderBy(i => i.DisplayOrder).Take(1))
+                .OrderBy(p => p.ReviewSubmittedAt);
+
+            var totalCount = await query.CountAsync();
+            var items = await query
+                .Skip((pageNumber - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+
+            return new PagedResult<Property>
+            {
+                Items = items,
+                TotalCount = totalCount,
+                PageNumber = pageNumber,
+                PageSize = pageSize
+            };
+        }
+
+        public async Task<IEnumerable<Property>> GetListingsDueForAutoApprovalAsync(
+            TimeSpan autoApproveAfter)
+        {
+            var cutoff = DateTime.UtcNow - autoApproveAfter;
+
+            return await _dbSet
+                .Where(p =>
+                    p.Status == PropertyStatus.Pending &&
+                    p.ReviewSubmittedAt != null &&
+                    p.ReviewSubmittedAt <= cutoff &&
+                    !p.IsPublished)
+                .Include(p => p.Images)
+                .OrderBy(p => p.ReviewSubmittedAt)
+                .Take(50)
+                .ToListAsync();
         }
 
         public async Task<bool> UnpublishPropertyAsync(Guid propertyId)
@@ -513,6 +565,22 @@ namespace Habitera.Repositories
         public async Task<bool> IsAgentOwnerAsync(Guid propertyId, Guid agentId)
         {
             return await _dbSet.AnyAsync(p => p.Id == propertyId && p.AgentId == agentId);
+        }
+
+        public async Task<Dictionary<Guid, int>> GetContactCountsAsync(IEnumerable<Guid> propertyIds)
+        {
+            var ids = propertyIds.Distinct().ToList();
+            if (ids.Count == 0)
+            {
+                return new Dictionary<Guid, int>();
+            }
+
+            return await _context.Conversations
+                .AsNoTracking()
+                .Where(c => c.PropertyId != null && ids.Contains(c.PropertyId.Value))
+                .GroupBy(c => c.PropertyId!.Value)
+                .Select(g => new { PropertyId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.PropertyId, x => x.Count);
         }
 
         private static double CalculateDistance(decimal lat1, decimal lon1, decimal lat2, decimal lon2)
@@ -690,6 +758,15 @@ namespace Habitera.Repositories
             };
         }
 
+        public async Task<List<Guid>> GetUserFavoritePropertyIdsAsync(Guid userId)
+        {
+            return await _dbSet
+                .Where(f => f.UserId == userId)
+                .OrderByDescending(f => f.CreatedAt)
+                .Select(f => f.PropertyId)
+                .ToListAsync();
+        }
+
         public async Task<bool> IsFavoriteAsync(Guid userId, Guid propertyId)
         {
             return await _dbSet.AnyAsync(f => f.UserId == userId && f.PropertyId == propertyId);
@@ -701,25 +778,14 @@ namespace Habitera.Repositories
                 .FirstOrDefaultAsync(f => f.UserId == userId && f.PropertyId == propertyId);
         }
 
-        public async Task<bool> ToggleFavoriteAsync(Guid userId, Guid propertyId)
+        public async Task SetFavoriteAsync(Guid userId, Guid propertyId, bool bookmarked)
         {
             var favorite = await GetFavoriteAsync(userId, propertyId);
 
-            if (favorite != null)
+            if (bookmarked)
             {
-                _dbSet.Remove(favorite);
+                if (favorite != null) return;
 
-                var property = await _context.Properties.FindAsync(propertyId);
-                if (property != null)
-                {
-                    property.FavoriteCount = Math.Max(0, property.FavoriteCount - 1);
-                }
-
-                await _context.SaveChangesAsync();
-                return false;
-            }
-            else
-            {
                 await _dbSet.AddAsync(new Favorite
                 {
                     Id = Guid.NewGuid(),
@@ -733,15 +799,46 @@ namespace Habitera.Repositories
                 {
                     property.FavoriteCount++;
                 }
-
-                await _context.SaveChangesAsync();
-                return true;
             }
+            else if (favorite != null)
+            {
+                _dbSet.Remove(favorite);
+
+                var property = await _context.Properties.FindAsync(propertyId);
+                if (property != null)
+                {
+                    property.FavoriteCount = Math.Max(0, property.FavoriteCount - 1);
+                }
+            }
+        }
+
+        public async Task<bool> ToggleFavoriteAsync(Guid userId, Guid propertyId)
+        {
+            var isFavorite = await IsFavoriteAsync(userId, propertyId);
+            await SetFavoriteAsync(userId, propertyId, !isFavorite);
+            await _context.SaveChangesAsync();
+            return !isFavorite;
         }
 
         public async Task<int> GetFavoriteCountByPropertyAsync(Guid propertyId)
         {
             return await _dbSet.CountAsync(f => f.PropertyId == propertyId);
+        }
+
+        public async Task<Dictionary<Guid, int>> GetFavoriteCountsAsync(IEnumerable<Guid> propertyIds)
+        {
+            var ids = propertyIds.Distinct().ToList();
+            if (ids.Count == 0)
+            {
+                return new Dictionary<Guid, int>();
+            }
+
+            return await _dbSet
+                .AsNoTracking()
+                .Where(f => ids.Contains(f.PropertyId))
+                .GroupBy(f => f.PropertyId)
+                .Select(g => new { PropertyId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.PropertyId, x => x.Count);
         }
 
         public async Task<Dictionary<Guid, bool>> GetFavoriteStatusesAsync(

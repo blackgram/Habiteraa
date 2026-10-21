@@ -47,6 +47,14 @@ namespace Habitera.Models
         public DateTime UpdatedAt { get; set; }
         public DateTime? PublishedAt { get; set; }
 
+        /// <summary>
+        /// When the agent submitted the listing for admin review.
+        /// Null means draft / not yet submitted.
+        /// </summary>
+        public DateTime? ReviewSubmittedAt { get; set; }
+
+        public string? RejectionReason { get; set; }
+
         public ICollection<PropertyImage> Images { get; set; } = new List<PropertyImage>();
         public ICollection<PropertyAmenity> Amenities { get; set; } = new List<PropertyAmenity>();
         public ICollection<Favorite> Favorites { get; set; } = new List<Favorite>();

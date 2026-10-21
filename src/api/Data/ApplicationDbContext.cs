@@ -24,6 +24,8 @@ namespace Habitera.Data
         public DbSet<PropertyAmenity> PropertyAmenities { get; set; }
         public DbSet<Favorite> Favorites { get; set; }
         public DbSet<ViewingBooking> ViewingBookings { get; set; }
+        public DbSet<Conversation> Conversations { get; set; }
+        public DbSet<ChatMessage> ChatMessages { get; set; }
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -107,8 +109,11 @@ namespace Habitera.Data
                 entity.Property(e => e.Bathrooms).HasPrecision(3, 1);
                 entity.Property(e => e.SquareFeet).HasPrecision(10, 2);
 
+                entity.Property(e => e.RejectionReason).HasMaxLength(500);
+
                 entity.HasIndex(e => e.AgentId);
                 entity.HasIndex(e => e.Status);
+                entity.HasIndex(e => e.ReviewSubmittedAt);
                 entity.HasIndex(e => new { e.City, e.State, e.Country });
                 entity.HasIndex(e => e.Price);
                 entity.HasIndex(e => e.CreatedAt);
@@ -146,6 +151,46 @@ namespace Habitera.Data
                     .OnDelete(DeleteBehavior.Cascade);
 
                 entity.HasIndex(e => e.PropertyId);
+            });
+
+            builder.Entity<Conversation>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.LastMessagePreview).HasMaxLength(200);
+
+                entity.HasOne(e => e.User)
+                    .WithMany()
+                    .HasForeignKey(e => e.UserId)
+                    .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasOne(e => e.Agent)
+                    .WithMany()
+                    .HasForeignKey(e => e.AgentId)
+                    .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasOne(e => e.Property)
+                    .WithMany()
+                    .HasForeignKey(e => e.PropertyId)
+                    .OnDelete(DeleteBehavior.SetNull);
+
+                entity.HasIndex(e => new { e.UserId, e.AgentId, e.PropertyId }).IsUnique();
+                entity.HasIndex(e => e.UserId);
+                entity.HasIndex(e => e.AgentId);
+                entity.HasIndex(e => e.LastMessageAt);
+            });
+
+            builder.Entity<ChatMessage>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Body).HasMaxLength(4000).IsRequired();
+
+                entity.HasOne(e => e.Conversation)
+                    .WithMany(c => c.Messages)
+                    .HasForeignKey(e => e.ConversationId)
+                    .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasIndex(e => new { e.ConversationId, e.CreatedAt });
+                entity.HasIndex(e => e.SenderId);
             });
 
             builder.Entity<Favorite>(entity =>
